@@ -1,45 +1,56 @@
-from fastapi import APIRouter, HTTPException
+# veterinario_module.py
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
+from abc import ABC, abstractmethod
 import mysql.connector
 from dotenv import load_dotenv
 import os
+
 load_dotenv()
 
-router_veterinario = APIRouter(prefix="/veterinario")
-
+# ===================================================
+# MODELO (SRP)
+# ===================================================
 class Veterinario(BaseModel):
     id: str
     email: str
     age: int
     is_admin: bool
 
-class VetBD:
-    def __init__(self, host = "localhost", user = "root", password = "", database = "veterinaria_DB"):
+
+# ===================================================
+# REPOSITORIO (OCP + ISP)
+# ===================================================
+class VeterinarioRepository(ABC):
+    """Interfaz para acceso a datos de veterinarios."""
+
+    @abstractmethod
+    def create(self, vet: Veterinario): ...
+    
+    @abstractmethod
+    def update(self, vet: Veterinario): ...
+    
+    @abstractmethod
+    def get_all(self) -> list[Veterinario]: ...
+    
+    @abstractmethod
+    def get_by_id(self, vet_id: str) -> Veterinario | None: ...
+
+
+# ===================================================
+# IMPLEMENTACIÓN CONCRETA MySQL (Cumple OCP)
+# ===================================================
+class MySQLVeterinarioRepository(VeterinarioRepository):
+    def __init__(self, host, user, password, database):
         self.config = {
             "host": host,
             "user": user,
             "password": password,
             "database": database
-            }
-            
-        self._crear_tabla()
+        }
 
     def _get_connection(self):
         return mysql.connector.connect(**self.config)
-    
-    def _crear_tabla(self):
-        conn = self._get_connection()
-        cursor = conn.cursor()
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS veterinarios (
-                id VARCHAR(50) PRIMARY KEY,
-                email VARCHAR(100),
-                age INT,
-                is_admin BOOLEAN
-            )
-        """)
-        conn.commit()
-        conn.close()
 
     def create(self, vet: Veterinario):
         conn = self._get_connection()
@@ -66,10 +77,10 @@ class VetBD:
         conn = self._get_connection()
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM veterinarios")
-        row = cursor.fetchall()
+        rows = cursor.fetchall()
         conn.close()
-        return [Veterinario(id=r[0], email=r[1], age=r[2], is_admin=r[3]) for r in row]
-    
+        return [Veterinario(id=r[0], email=r[1], age=r[2], is_admin=r[3]) for r in rows]
+
     def get_by_id(self, vet_id: str):
         conn = self._get_connection()
         cursor = conn.cursor()
@@ -78,46 +89,93 @@ class VetBD:
         conn.close()
         if row:
             return Veterinario(id=row[0], email=row[1], age=row[2], is_admin=row[3])
-        return HTTPException(status_code=404, detail="Veterinario no encontrado")
+        return None
 
+
+# ===================================================
+# SERVICIO (Cumple DIP)
+# ===================================================
 class VeterinarioService:
-    def __init__(self, DB: VetBD):
-        self.bd = DB
+    """Lógica de negocio (no depende de implementación concreta)."""
+    def __init__(self, repository: VeterinarioRepository):
+        self.repository = repository
 
     def create_veterinario(self, vet: Veterinario):
-        self.bd.create(vet)
+        self.repository.create(vet)
         return vet
 
     def update_veterinario(self, vet: Veterinario):
-        self.bd.update(vet)
+        if not self.repository.get_by_id(vet.id):
+            raise HTTPException(status_code=404, detail="Veterinario no encontrado")
+        self.repository.update(vet)
         return vet
 
     def get_all_veterinarios(self):
-        return self.bd.get_all()
+        return self.repository.get_all()
 
     def get_veterinario_by_id(self, vet_id: str):
-        return self.bd.get_by_id(vet_id)
+        vet = self.repository.get_by_id(vet_id)
+        if not vet:
+            raise HTTPException(status_code=404, detail="Veterinario no encontrado")
+        return vet
 
-DB = VetBD(
-    host=os.getenv("DB_HOST"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD"),
-    database=os.getenv("DB_NAME")
-)
 
-service = VeterinarioService(DB)
+# ===================================================
+# INICIALIZADOR DE BASE DE DATOS (SRP)
+# ===================================================
+def initialize_database(host, user, password, database):
+    conn = mysql.connector.connect(
+        host=host,
+        user=user,
+        password=password,
+        database=database
+    )
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS veterinarios (
+            id VARCHAR(50) PRIMARY KEY,
+            email VARCHAR(100),
+            age INT,
+            is_admin BOOLEAN
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+# ===================================================
+# ROUTER (Inyección de dependencias - DIP)
+# ===================================================
+router_veterinario = APIRouter(prefix="/veterinario")
+
+# Crea la base de datos y el repositorio una sola vez
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST"),
+    "user": os.getenv("DB_USER"),
+    "password": os.getenv("DB_PASSWORD"),
+    "database": os.getenv("DB_NAME")
+}
+
+initialize_database(**DB_CONFIG)
+
+repository = MySQLVeterinarioRepository(**DB_CONFIG)
+service = VeterinarioService(repository)
+
 
 @router_veterinario.post("/create")
 async def create_veterinario(vet: Veterinario):
     return service.create_veterinario(vet)
 
+
 @router_veterinario.post("/update")
 async def update_veterinario(vet: Veterinario):
     return service.update_veterinario(vet)
 
+
 @router_veterinario.get("/all")
 async def get_all_veterinarios():
     return service.get_all_veterinarios()
+
 
 @router_veterinario.get("/{vet_id}")
 async def get_veterinario(vet_id: str):
