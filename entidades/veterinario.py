@@ -1,4 +1,4 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 import mysql.connector
 from dotenv import load_dotenv
@@ -104,6 +104,8 @@ DB = VetBD(
     password=os.getenv("DB_PASSWORD"),
     database=os.getenv("DB_NAME")
 )
+
+service = VeterinarioService(DB)
 
 @router_veterinario.post("/create")
 async def create_veterinario(vet: Veterinario):
